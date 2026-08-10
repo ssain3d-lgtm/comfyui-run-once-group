@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+_result.txt
+_result_js.txt
+.DS_Store
