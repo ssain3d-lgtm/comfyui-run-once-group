@@ -11,7 +11,7 @@ from output nodes -- never schedules it. It costs one entry in the prompt dict a
 
 Widget order is load-bearing. ComfyUI restores `widgets_values` positionally, so `group_titles`
 must stay in slot 1 where the old single-line `group_title` was: a workflow saved with
-["...", "A-2. ④ 프롬프트 · LLM", "Bypass"] reloads as a one-line list and keeps working.
+["...", "D. Upscale - Interpolate", "Bypass"] reloads as a one-line list and keeps working.
 """
 
 
@@ -22,21 +22,22 @@ class RunOnceGroupMode:
             "required": {
                 "enabled": ("BOOLEAN", {
                     "default": True,
-                    "label_on": "적용",
-                    "label_off": "끔",
-                    "tooltip": "끄면 이 노드는 아무 것도 하지 않습니다.",
+                    "label_on": "On",
+                    "label_off": "Off",
+                    "tooltip": "Turn this off and the node does nothing at all.",
                 }),
                 "group_titles": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "tooltip": "대상 그룹 제목을 한 줄에 하나씩. 노드를 우클릭하면 현재 그래프의 "
-                               "그룹을 체크해서 고를 수 있습니다. 구분자는 줄바꿈뿐입니다 — "
-                               "그룹 제목 자체에 쉼표가 들어갈 수 있어서 쉼표는 쓰지 않습니다.",
+                    "tooltip": "One target group title per line. Right-click the node to tick "
+                               "groups from the current graph instead of typing them. Newline is "
+                               "the only separator - titles often contain commas, so a comma "
+                               "split would tear them in half and match nothing.",
                 }),
                 "mode_during_run": (["Bypass", "Mute", "Active"], {
                     "default": "Bypass",
-                    "tooltip": "Run 을 누른 그 실행 동안 선택한 모든 그룹을 이 모드로 둡니다. "
-                               "실행이 끝나면 각 노드의 원래 모드로 되돌립니다.",
+                    "tooltip": "Hold every chosen group in this mode for the run you just "
+                               "started, then put each node back to the mode it actually had.",
                 }),
             },
         }
@@ -44,9 +45,9 @@ class RunOnceGroupMode:
     RETURN_TYPES = ()
     FUNCTION = "noop"
     CATEGORY = "utils"
-    DESCRIPTION = ("Run 을 누를 때만 지정한 그룹들의 모드를 바꾸고, 실행이 끝나면 원래대로 "
-                   "되돌립니다. 그룹은 여러 개 고를 수 있습니다. 실제 동작은 프론트엔드에서 "
-                   "일어납니다.")
+    DESCRIPTION = ("Switch the mode of the groups you choose for one queue submit, then restore "
+                   "them when the run ends. Several groups at once. The work happens in the "
+                   "frontend.")
 
     def noop(self):
         return ()

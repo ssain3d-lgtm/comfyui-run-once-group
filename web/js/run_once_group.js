@@ -60,9 +60,9 @@ const cycle = {
  * rgthree clears the field in a finally block, so it is only set for the duration of that submit.
  */
 function scopedRunReason(options) {
-    if (options?.isPartialExecution) return "코어 부분 실행";
+    if (options?.isPartialExecution) return "core partial execution";
     const ids = globalThis.rgthree?.queueNodeIds;
-    if (Array.isArray(ids) && ids.length) return `rgthree 그룹/노드 큐 (노드 ${ids.length}개)`;
+    if (Array.isArray(ids) && ids.length) return `rgthree group/node queue (${ids.length} nodes)`;
     return null;
 }
 
@@ -86,8 +86,8 @@ function titlesWidget(node) {
  * One group title per line.
  *
  * Newline is the only separator on purpose. Titles in these workflows contain commas and other
- * punctuation -- "D. 업스케일 · 보간 (전부 바이패스)" -- so splitting on anything else would tear a
- * title in half and then silently match nothing.
+ * punctuation -- "D. Upscale, Interpolate (all bypassed)" -- so splitting on anything else would
+ * tear a title in half and then silently match nothing.
  */
 function targetTitles(node) {
     const raw = String(titlesWidget(node)?.value ?? "");
@@ -161,18 +161,18 @@ function applyFor(ctrl) {
             n += 1;
         }
         changed += n;
-        applied.push(`"${title}" ${n}개`);
+        applied.push(`"${title}" ${n}`);
     }
 
     if (missing.length) {
         // Silence would be indistinguishable from the feature being broken.
-        console.warn(`${TAG} 그룹을 찾지 못했습니다: ` +
-            missing.map((t) => JSON.stringify(t)).join(", ") + " — 현재 그룹: " +
+        console.warn(`${TAG} no such group: ` +
+            missing.map((t) => JSON.stringify(t)).join(", ") + " — groups in this graph: " +
             groups.map((g) => JSON.stringify(String(g.title ?? ""))).join(", "));
     }
     if (changed) {
-        console.log(`${TAG} ${applied.join(", ")} — 노드 ${changed}개를 ${MODE_NAME[wanted]} 로 ` +
-            `전환. 실행이 끝나면 해제합니다.`);
+        console.log(`${TAG} ${applied.join(", ")} — ${changed} nodes switched to ` +
+            `${MODE_NAME[wanted]}. Released when the run ends.`);
     }
 }
 
@@ -188,7 +188,7 @@ function release(reason) {
     tracked.clear();
     app.graph?.setDirtyCanvas?.(true, false);
     resetCycle();
-    console.log(`${TAG} 실행 종료(${reason}) — 노드 ${n}개 원래 모드로 복원`);
+    console.log(`${TAG} run finished (${reason}) — ${n} nodes restored to their original mode`);
 }
 
 function resetCycle() {
@@ -217,7 +217,7 @@ function installListeners() {
     api.addEventListener("status", ({ detail }) => {
         const r = readRemaining(detail);
         if (r !== null) cycle.remaining = r;
-        maybeRelease("큐 비움");
+        maybeRelease("queue empty");
     });
 
     api.addEventListener("execution_start", () => {
@@ -250,8 +250,8 @@ function installQueueHook() {
             if (cycle.active && !cycle.sawStart) {
                 setTimeout(() => {
                     if (cycle.active && !cycle.sawStart) {
-                        console.warn(`${TAG} 실행이 시작되지 않았습니다(제출 거부로 보임).`);
-                        release("실행 없음");
+                        console.warn(`${TAG} execution never started (the submit looks rejected).`);
+                        release("no execution");
                     }
                 }, 2000);
             }
@@ -280,7 +280,7 @@ function attachHooks(node) {
         // very group this node targets would bypass that group and leave nothing to execute.
         const scoped = scopedRunReason(options);
         if (scoped) {
-            console.log(`${TAG} ${scoped} — 이번 제출은 건드리지 않습니다.`);
+            console.log(`${TAG} ${scoped} — leaving this submit alone.`);
             return;
         }
 
@@ -293,7 +293,7 @@ function attachHooks(node) {
             }
             applyFor(node);
         } catch (error) {
-            console.warn(`${TAG} 적용 실패, 그대로 제출합니다:`, error);
+            console.warn(`${TAG} could not apply, submitting unchanged:`, error);
         }
     };
 }
@@ -307,7 +307,7 @@ app.registerExtension({
         // Autosave is off, so an unloaded page never persists the temporary state -- but restoring
         // here keeps the in-memory graph honest if the tab is merely navigated.
         window.addEventListener("beforeunload", () => {
-            if (cycle.active) release("페이지 종료");
+            if (cycle.active) release("page unload");
         });
     },
 
@@ -346,18 +346,18 @@ app.registerExtension({
             }));
             if (chosen.length) {
                 entries.push({
-                    content: "— 모두 해제",
+                    content: "— Clear all",
                     callback: () => setTitles(node, []),
                 });
             }
 
             options.push({
-                content: "그룹 고르기",
+                content: "Pick groups",
                 has_submenu: true,
                 submenu: {
                     options: entries.length
                         ? entries
-                        : [{ content: "(그룹 없음)", disabled: true }],
+                        : [{ content: "(no groups)", disabled: true }],
                 },
             });
             return options;
