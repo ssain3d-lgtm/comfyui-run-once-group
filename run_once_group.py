@@ -12,6 +12,8 @@ from output nodes -- never schedules it. It costs one entry in the prompt dict a
 Widget order is load-bearing. ComfyUI restores `widgets_values` positionally, so `group_titles`
 must stay in slot 1 where the old single-line `group_title` was: a workflow saved with
 ["...", "D. Upscale - Interpolate", "Bypass"] reloads as a one-line list and keeps working.
+The JS adds a "Pick groups" button on top of these three; it is appended last and flagged
+non-serializing precisely so slots 0-2 keep meaning what every saved workflow says they mean.
 """
 
 
