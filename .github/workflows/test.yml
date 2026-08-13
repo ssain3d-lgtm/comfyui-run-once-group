@@ -11,9 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Node is only the test runner -- the extension itself runs in the browser -- so one
+      # current LTS is the whole matrix.
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       # The frontend is the whole extension, so this is the run that matters. No install step:
       # the suite is plain node with no dependencies.
