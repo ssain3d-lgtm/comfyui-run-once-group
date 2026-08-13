@@ -375,6 +375,10 @@ function installSubmitHook() {
             cycle.accepted += 1;
             const id = res?.prompt_id;
             if (id) cycle.pending.add(id);
+            // A sweep armed before this submit was judging an older, emptier queue. Results are
+            // owed again, so that verdict is void -- without this, a Run pressed inside the sweep
+            // window could be torn down by the stale timer before the status broadcast lands.
+            clearSweep();
         }
         return res;
     };

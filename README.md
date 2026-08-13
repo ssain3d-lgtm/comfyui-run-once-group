@@ -177,7 +177,7 @@ execution schedule.
 ## Verification
 
 ```
-node tests/run.mjs        →  22 pass / 0 fail
+node tests/run.mjs        →  23 pass / 0 fail
 ```
 
 No dependencies, no network, no ComfyUI. The tests load `web/js/run_once_group.js`
@@ -189,7 +189,8 @@ ComfyUI serves `WEB_DIRECTORY` (`./web/js`) and nothing else, so it never sees i
 queued behind another job · a rejected submit restores without needing an
 `execution_start` that will never come · a `200` carrying `node_errors` counts as
 rejected · a stale `status{0}` landing right after acceptance does not release · a
-cleared queue is swept after its grace period · a batch of two releases once, at the end
+cleared queue is swept after its grace period · a resubmit inside the sweep window voids
+the stale sweep · a batch of two releases once, at the end
 · interrupt takes the normal path · a POST result that never reaches us is inferred from
 a growing queue.
 

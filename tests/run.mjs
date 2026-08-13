@@ -167,6 +167,31 @@ await test("cleared queue: outstanding ids are swept and the modes come back", a
     assert.equal(a.mode, MODE.Active, "swept after the grace period");
 });
 
+await test("a resubmit inside the sweep window is not torn down by the stale sweep", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    app.graph.groups = [makeGroup("Upscale", [a])];
+    const ctrl = makeControl(ext, { titles: "Upscale" });
+    app.graph._nodes = [ctrl, a];
+
+    await app.queuePrompt(0, 1);
+    api.status(0);          // queue cleared: p1 will never report, the sweep is armed
+    await sleep(300);
+
+    // The user immediately runs again. Acceptance must void the armed sweep even if the
+    // queue-change broadcast is slow to arrive.
+    await app.queuePrompt(0, 1);
+    await sleep(1400);      // past the original sweep deadline, no status received yet
+    assert.equal(a.mode, MODE.Bypass, "the fresh run survives the old timer");
+
+    api.emit("execution_start", { prompt_id: api.accepted[1] });
+    api.emit("execution_success", { prompt_id: api.accepted[1] });
+    api.status(0);
+    assert.equal(a.mode, MODE.Bypass, "p1 is still owed, so this arms a legitimate sweep");
+    await sleep(1700);
+    assert.equal(a.mode, MODE.Active, "and the dead p1 is then swept normally");
+});
+
 await test("batch of two releases once, at the end", async () => {
     const ext = await setupExtension();
     const a = makeNode("a");
