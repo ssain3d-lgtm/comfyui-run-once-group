@@ -75,6 +75,9 @@ const cycle = {
 /** Nested app.queuePrompt calls in flight. ComfyUI re-enters it while a batch is draining. */
 let submitDepth = 0;
 
+/** Nested app.graphToPrompt calls in flight. See guardSerialize for what this distinguishes. */
+let promptDepth = 0;
+
 /**
  * Is this submit scoped to part of the graph rather than a full Run?
  *
@@ -211,6 +214,7 @@ function applyFor(ctrl) {
             if (tracked.has(node)) continue;
             if (node.mode === wanted) continue; // nothing to change, nothing to restore
             tracked.set(node, node.mode);
+            guardSerialize(node);
             node.mode = wanted;
             n += 1;
         }
@@ -232,6 +236,33 @@ function applyFor(ctrl) {
         console.log(`${TAG} ${applied.join(", ")} — ${changed} nodes switched to ` +
             `${MODE_NAME[wanted]}. Released when the run ends.`);
     }
+}
+
+/**
+ * Keep a save made mid-run honest.
+ *
+ * litegraph fills `o.mode` from the live node and only then hands `o` to onSerialize, so this is
+ * the one place a claimed node can report the mode it will go back to rather than the one it is
+ * being held in. Ctrl+S during a run therefore writes the graph the user actually built, and the
+ * README's old "the one thing to avoid" stops being the user's problem to remember.
+ *
+ * graphToPrompt is excluded on purpose. It serializes the workflow ComfyUI embeds in the output
+ * image, and that record should say what really ran. The API prompt is unaffected either way --
+ * ComfyUI builds it from live node.mode and never from this copy.
+ *
+ * The hook is left installed after release: `tracked` is empty by then, so it is inert, and one
+ * permanent wrapper is cheaper than adding and removing one per run.
+ */
+function guardSerialize(node) {
+    if (node.__sain3RunOnceSerializeGuard) return;
+    node.__sain3RunOnceSerializeGuard = true;
+    const previous = node.onSerialize;
+    node.onSerialize = function (o) {
+        previous?.apply(this, arguments);
+        if (promptDepth > 0) return;
+        if (!o || !tracked.has(this)) return;
+        o.mode = tracked.get(this);
+    };
 }
 
 function release(reason) {
@@ -383,6 +414,28 @@ function installSubmitHook() {
         return res;
     };
     api.__sain3RunOnceSubmitHook = true;
+}
+
+/**
+ * Mark the window in which a serialization is destined for the server rather than for disk.
+ *
+ * ComfyUI's graphToPrompt delegates to a util that calls graph.serialize() for the workflow it
+ * embeds alongside the prompt. Wrapping the public method is what lets guardSerialize tell that
+ * copy apart from the one a Ctrl+S writes. If some future path reaches the util directly, the
+ * embedded workflow simply records pre-run modes -- the prompt itself is never affected.
+ */
+function installPromptHook() {
+    if (typeof app?.graphToPrompt !== "function" || app.__sain3RunOncePromptHooked) return;
+    const original = app.graphToPrompt;
+    app.graphToPrompt = async function (...args) {
+        promptDepth += 1;
+        try {
+            return await original.apply(this, args);
+        } finally {
+            promptDepth = Math.max(0, promptDepth - 1);
+        }
+    };
+    app.__sain3RunOncePromptHooked = true;
 }
 
 function installQueueHook() {
@@ -581,6 +634,7 @@ app.registerExtension({
     setup() {
         installListeners();
         installSubmitHook();
+        installPromptHook();
         installQueueHook();
         // Autosave is off, so an unloaded page never persists the temporary state -- but restoring
         // here keeps the in-memory graph honest if the tab is merely navigated.

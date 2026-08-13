@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # The frontend is the whole extension, so this is the run that matters. No install step:
+      # the suite is plain node with no dependencies.
+      - name: Frontend behaviour
+        run: node tests/run.mjs
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      # 3.9 is the floor ComfyUI still supports, and the widget schema is what every saved
+      # workflow is keyed to -- a typo there orphans nodes rather than raising anything.
+      - name: Node schema
+        run: python tests/test_node.py

@@ -246,6 +246,73 @@ await test("acceptance is inferred when the POST result never reaches us", async
     assert.equal(a.mode, MODE.Active);
 });
 
+/* ------------------------------------------------------------------ saving mid-run */
+
+const modeOf = (workflow, id) => workflow.nodes.find((n) => n.id === id).mode;
+
+await test("a save made mid-run writes the modes the user actually built", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    const b = makeNode("b", MODE.Mute);
+    app.graph.groups = [makeGroup("Upscale", [a, b])];
+    const ctrl = makeControl(ext, { titles: "Upscale" });
+    app.graph._nodes = [ctrl, a, b];
+
+    await app.queuePrompt(0, 1);
+    assert.equal(a.mode, MODE.Bypass, "held on the canvas");
+
+    // What Ctrl+S writes: graph.serialize() outside graphToPrompt.
+    const saved = app.graph.serialize();
+    assert.equal(modeOf(saved, "a"), MODE.Active, "restored to its real mode on disk");
+    assert.equal(modeOf(saved, "b"), MODE.Mute, "and not to a guessed default");
+    assert.equal(a.mode, MODE.Bypass, "saving does not disturb the live graph");
+});
+
+await test("the workflow embedded beside the prompt still records what ran", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    app.graph.groups = [makeGroup("Upscale", [a])];
+    const ctrl = makeControl(ext, { titles: "Upscale" });
+    app.graph._nodes = [ctrl, a];
+
+    await app.queuePrompt(0, 1);
+    const { workflow, output } = await app.graphToPrompt();
+    assert.equal(modeOf(workflow, "a"), MODE.Bypass, "provenance: the image says it was bypassed");
+    assert.ok(!output.executed.includes("a"), "and the prompt itself skipped it");
+});
+
+await test("serialization is normal again once the run releases", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    app.graph.groups = [makeGroup("Upscale", [a])];
+    const ctrl = makeControl(ext, { titles: "Upscale" });
+    app.graph._nodes = [ctrl, a];
+
+    await app.queuePrompt(0, 1);
+    api.emit("execution_start", {});
+    api.emit("execution_success", { prompt_id: api.accepted.at(-1) });
+    api.status(0);
+
+    a.mode = MODE.Mute;   // the user changes it by hand after the run
+    assert.equal(modeOf(app.graph.serialize(), "a"), MODE.Mute, "the guard is inert once released");
+});
+
+await test("a node that already had an onSerialize keeps it", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    let called = 0;
+    a.onSerialize = (o) => { called += 1; o.marker = "mine"; };
+    app.graph.groups = [makeGroup("Upscale", [a])];
+    const ctrl = makeControl(ext, { titles: "Upscale" });
+    app.graph._nodes = [ctrl, a];
+
+    await app.queuePrompt(0, 1);
+    const saved = app.graph.serialize();
+    assert.equal(called > 0, true, "the original hook still runs");
+    assert.equal(saved.nodes.find((n) => n.id === "a").marker, "mine");
+    assert.equal(modeOf(saved, "a"), MODE.Active, "and ours still corrects the mode");
+});
+
 /* ------------------------------------------------------------------ regressions */
 
 await test("scoped run (core partial execution) is left alone", async () => {

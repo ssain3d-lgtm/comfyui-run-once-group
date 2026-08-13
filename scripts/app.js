@@ -11,6 +11,41 @@ import { api } from "./api.js";
 export const extensions = [];
 
 /**
+ * graph.serialize() mirrors LGraphNode.serialize(): `mode` is filled from the live node and the
+ * object is only then handed to onSerialize, which may rewrite it. That ordering is the whole
+ * mechanism behind keeping a mid-run save clean, so the double has to reproduce it exactly.
+ */
+function makeGraph() {
+    return {
+        groups: [],
+        _nodes: [],
+        setDirtyCanvas() {},
+        serialize() {
+            return {
+                nodes: this._nodes.map((n) => {
+                    const o = { id: n.id, type: n.type, mode: n.mode };
+                    n.onSerialize?.(o);
+                    return o;
+                }),
+            };
+        },
+    };
+}
+
+/**
+ * ComfyUI's real one delegates to a util that calls graph.serialize() for the workflow embedded
+ * beside the prompt, while the prompt itself is built from live node.mode. Both halves matter to
+ * the extension, so both are modelled.
+ */
+async function baseGraphToPrompt() {
+    await Promise.resolve();
+    const live = (app.graph._nodes || [])
+        .filter((n) => n.mode !== 4 && n.mode !== 2)
+        .map((n) => n.id);
+    return { workflow: app.graph.serialize(), output: { executed: live } };
+}
+
+/**
  * Mirrors app.js: beforeQueued on every widget of every node, then graphToPrompt, then POST.
  * Errors from api.queuePrompt are swallowed (ComfyUI shows a dialog instead of rethrowing).
  */
@@ -22,7 +57,7 @@ async function baseQueuePrompt(number, batchCount = 1, queueNodeIds = null) {
             for (const w of n.widgets || []) w.beforeQueued?.({ isPartialExecution });
         }
         try {
-            const res = await api.queuePrompt(number, { output: {} });
+            const res = await api.queuePrompt(number, await app.graphToPrompt());
             app.lastNodeErrors = res.node_errors;
         } catch {
             break;   // ComfyUI breaks out of the batch loop on a refused submit
@@ -32,7 +67,7 @@ async function baseQueuePrompt(number, batchCount = 1, queueNodeIds = null) {
 }
 
 export const app = {
-    graph: { groups: [], _nodes: [], setDirtyCanvas() {} },
+    graph: makeGraph(),
     canvas: {},
     extensionManager: { toast: { _sent: [], add(t) { this._sent.push(t); } } },
 
@@ -42,12 +77,18 @@ export const app = {
 
     queuePrompt: baseQueuePrompt,
 
+    graphToPrompt: baseGraphToPrompt,
+
     reset() {
-        this.graph = { groups: [], _nodes: [], setDirtyCanvas() {} };
+        this.graph = makeGraph();
         this.extensionManager.toast._sent = [];
-        this.queuePrompt = baseQueuePrompt;   // drop any wrapper a previous test installed
+        // Drop every wrapper a previous test installed. Miss one and the stale wrapper keeps
+        // driving the previous module instance's state while the fresh one sits at its defaults.
+        this.queuePrompt = baseQueuePrompt;
+        this.graphToPrompt = baseGraphToPrompt;
         delete this.__sain3RunOnceListeners;
         delete this.__sain3RunOnceHooked;
+        delete this.__sain3RunOncePromptHooked;
         extensions.length = 0;
         api.reset();
     },

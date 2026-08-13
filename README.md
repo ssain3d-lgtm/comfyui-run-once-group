@@ -11,13 +11,14 @@ hunting down every node and pressing Ctrl+B twice.
 
 ## Install
 
+Search **Run Once Group Toggle** in ComfyUI Manager, or clone it yourself:
+
 ```
 cd ComfyUI/custom_nodes
 git clone https://github.com/ssain3d-lgtm/comfyui-run-once-group
 ```
 
-Restart ComfyUI, then hard-refresh the browser (Ctrl+F5). No dependencies, and
-nothing is written to disk.
+Restart ComfyUI, then hard-refresh the browser (Ctrl+F5). No dependencies.
 
 ## Use
 
@@ -142,11 +143,25 @@ owed.
 
 ## Why it is safe to leave modes changed mid-run
 
-`Comfy.Workflow.AutoSave` defaults to `off` and nothing here writes to disk, so a
-browser crash or refresh mid-run reopens the saved original.
+**Saving during a run writes the graph you built, not the one being held.** Ctrl+S at any
+point in a run — or AutoSave set to `after delay` — produces a file with every node in its
+real mode.
 
-**One thing to watch: saving by hand (Ctrl+S) during a run saves the temporary state.**
-The same applies if you switch AutoSave to `after delay`.
+litegraph fills `mode` from the live node and only then hands the serialized object to
+`onSerialize`, so a claimed node gets to report the mode it is going back to. Nothing else
+is touched:
+
+| Serialized for | Records | Why |
+|---|---|---|
+| Ctrl+S, AutoSave, Export | the original modes | the file should be the graph you built |
+| the workflow embedded in output images | the modes that ran | provenance should be honest |
+| the API prompt itself | — | built from live `node.mode`, never from this copy |
+
+Telling those apart is a matter of wrapping `app.graphToPrompt`, which is the only path that
+serializes on the way to the server.
+
+A browser crash or refresh mid-run is safe for the older reason too: `Comfy.Workflow.AutoSave`
+defaults to `off`, so reopening gives you the last deliberate save.
 
 ## Failure handling
 
@@ -177,13 +192,20 @@ execution schedule.
 ## Verification
 
 ```
-node tests/run.mjs        →  23 pass / 0 fail
+node tests/run.mjs        →  27 pass / 0 fail
+python tests/test_node.py →   8 pass / 0 fail
 ```
 
-No dependencies, no network, no ComfyUI. The tests load `web/js/run_once_group.js`
-exactly as shipped: its `../../scripts/app.js` import resolves to the test doubles in
-`scripts/`, which is the only reason that directory exists at the repository root.
-ComfyUI serves `WEB_DIRECTORY` (`./web/js`) and nothing else, so it never sees it.
+No dependencies, no network, no ComfyUI, and both run on every push via
+[`.github/workflows/test.yml`](.github/workflows/test.yml). The frontend tests load
+`web/js/run_once_group.js` exactly as shipped: its `../../scripts/app.js` import resolves
+to the test doubles in `scripts/`, which is the only reason that directory exists at the
+repository root. ComfyUI serves `WEB_DIRECTORY` (`./web/js`) and nothing else, so it never
+sees it.
+
+Running against doubles means a change in ComfyUI itself stays green. The assumptions that
+buys, and a ten-minute manual pass for after a frontend update, are in
+[`tests/SMOKE.md`](tests/SMOKE.md).
 
 **Release timing** — an accepted submit survives well past the old two-second net while
 queued behind another job · a rejected submit restores without needing an
@@ -201,11 +223,20 @@ run `Bypass` and `Active` at once without touching each other · `enabled=false`
 nothing · whitespace, blank lines and duplicates are cleaned · the older `group_title`
 widget name still works.
 
+**Saving mid-run** — a save taken while a run is held writes every node's real mode, and
+leaves the live canvas alone · the workflow embedded beside the prompt still records what
+actually ran · the guard goes inert once released · a node that already had an
+`onSerialize` keeps it.
+
 **UI** — the picker ticks chosen groups, flags titles matching nothing and removes them
 on click · the button is appended last and does not serialize, so `widgets_values` keeps
 the layout saved workflows were written against · a node saved before the button existed
 is grown to fit it and never shrunk · the badge reports counts, shortfalls, the held
 count during a run, and `off`.
+
+**Schema** (`tests/test_node.py`) — the class name saved workflows are keyed to, the widget
+order `widgets_values` restores positionally, the three litegraph modes the JS maps, and the
+absence of outputs that would put the node in the execution schedule.
 
 ## Browser cache
 
