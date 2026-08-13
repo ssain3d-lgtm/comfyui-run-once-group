@@ -11,21 +11,35 @@ hunting down every node and pressing Ctrl+B twice.
 
 ## Install
 
+Search **Run Once Group Toggle** in ComfyUI Manager, or clone it yourself:
+
 ```
 cd ComfyUI/custom_nodes
 git clone https://github.com/ssain3d-lgtm/comfyui-run-once-group
 ```
 
-Restart ComfyUI, then hard-refresh the browser (Ctrl+F5). No dependencies, and
-nothing is written to disk.
+Restart ComfyUI, then hard-refresh the browser (Ctrl+F5). No dependencies.
 
 ## Use
 
 1. Add **Run Once Group Toggle** anywhere on the canvas.
-2. Right-click it and open the group picker. Each click toggles a `✔`, and the chosen
-   titles collect in the `group_titles` box, one per line. The last entry clears them
-   all.
+2. Press **Pick groups** on the node (or right-click it — same menu). Each click toggles
+   a `✔`, and the chosen titles collect in the `group_titles` box, one per line. The last
+   entry clears them all.
 3. Pick `mode_during_run`. It applies to every group you chose.
+
+The badge in the node's title bar says what will happen, so you never have to open the
+console to find out:
+
+| Badge | Meaning |
+|---|---|
+| `3 groups` | three chosen, all three found |
+| `1/2 groups` | one title matches nothing — renamed group, or a typo |
+| `holding 12` | a run is in flight and 12 nodes are switched right now |
+| `no groups` / `off` | nothing chosen, or `enabled` is off |
+
+A title that matches nothing also gets its own `✖ … (not in this graph)` row in the
+picker, so a group renamed out from under your list is visible and one click removes it.
 
 | Mode | While running | After |
 |---|---|---|
@@ -43,8 +57,8 @@ split and match nothing. Leading and trailing spaces, blank lines and duplicates
 cleaned up for you.
 
 A typo on one line does not stop the rest: the groups that matched are still applied,
-and only the missing title is reported to the console along with the graph's current
-group list.
+and only the missing title is called out — on the badge before the run, as a toast at
+the moment it costs you work, and in the console with the graph's current group list.
 
 **Overlapping groups are safe.** If one node belongs to two groups you selected, the
 first claim records its original mode and it is restored exactly once.
@@ -92,8 +106,9 @@ Where rgthree is not installed this is simply `undefined` and has no effect.
 
 ```
 beforeQueued   → graphToPrompt()  →  POST  →  execution_start … execution_success
-   ↑ apply                                                        ↓
-   the only point that reaches this prompt          status{queue_remaining:0} → release
+   ↑ apply                          ↓ accepted?                     ↓
+   the only point that reaches      prompt_id      status{queue_remaining:0} → release
+   this prompt
 ```
 
 - **Applying must happen in `beforeQueued`.** `graphToPrompt()` runs immediately
@@ -105,20 +120,66 @@ The release condition is `queue_remaining == 0` rather than a single completion 
 so a `batchCount` of two or more — or several items queued by hand — is not released
 the moment the first one finishes.
 
+### "Accepted" is not "started"
+
+These are separate questions and they must not share an answer:
+
+| Question | Answered by | How long it takes |
+|---|---|---|
+| Did the server **take** the submit? | the `POST /prompt` result | milliseconds |
+| Has the submit **started running**? | `execution_start` | as long as the queue ahead of it |
+
+Press Run while another job is already going and your prompt is accepted at once but does
+not start for minutes. An earlier build read `execution_start` as the acceptance signal
+and gave it two seconds, so **every run queued behind another job was torn down two
+seconds in** — the modes snapped back on the canvas and the console claimed the submit
+had been rejected. The prompt itself was fine, because `graphToPrompt()` had already run,
+but the graph was lying to you for the rest of the run.
+
+Acceptance now comes from the POST result, which `api.queuePrompt` resolves with a
+`prompt_id` or throws on, regardless of queue depth. Outstanding `prompt_id`s are then
+tracked individually, so release needs both an empty server queue and no results still
+owed.
+
 ## Why it is safe to leave modes changed mid-run
 
-`Comfy.Workflow.AutoSave` defaults to `off` and nothing here writes to disk, so a
-browser crash or refresh mid-run reopens the saved original.
+**Saving during a run writes the graph you built, not the one being held.** Ctrl+S at any
+point in a run — or AutoSave set to `after delay` — produces a file with every node in its
+real mode.
 
-**One thing to watch: saving by hand (Ctrl+S) during a run saves the temporary state.**
-The same applies if you switch AutoSave to `after delay`.
+litegraph fills `mode` from the live node and only then hands the serialized object to
+`onSerialize`, so a claimed node gets to report the mode it is going back to. Nothing else
+is touched:
+
+| Serialized for | Records | Why |
+|---|---|---|
+| Ctrl+S, AutoSave, Export | the original modes | the file should be the graph you built |
+| the workflow embedded in output images | the modes that ran | provenance should be honest |
+| the API prompt itself | — | built from live `node.mode`, never from this copy |
+
+Telling those apart is a matter of wrapping `app.graphToPrompt`, which is the only path that
+serializes on the way to the server.
+
+A browser crash or refresh mid-run is safe for the older reason too: `Comfy.Workflow.AutoSave`
+defaults to `off`, so reopening gives you the last deliberate save.
 
 ## Failure handling
 
-- If a submit is rejected (validation error, auth failure), `execution_start` never
-  arrives. A 2-second net restores everything and warns. Nothing is left bypassed.
-- Interrupts and execution errors take the normal release path.
-- Leaving the page restores once more.
+Nothing is ever left bypassed, and nothing is released while a run of yours is alive.
+
+| Situation | What happens |
+|---|---|
+| Submit rejected — validation error, auth failure, server down | The POST throws, nothing is queued, everything restores ~0.5 s later |
+| `200` that still carries `node_errors` | Counted as rejected, same path |
+| Interrupt, or an execution error | The normal release path |
+| **Queue cleared while your prompts are pending** | Those prompts never report a result. After 1.5 s of a confirmed-empty queue the ids are treated as dead and the modes come back |
+| Another extension replaced `api.queuePrompt` without chaining | The POST result never reaches us, but a queue that grew still proves the run is real, so it is held rather than torn down |
+| Leaving the page | Restores once more |
+
+The half-second before declaring a submit rejected is waiting on the queue-change
+broadcast, which the server sends as it puts the prompt on the queue — before it even
+answers the POST. That is a wait measured in milliseconds, unlike the `execution_start`
+it replaced.
 
 ## Why the frontend and not a backend node
 
@@ -130,32 +191,58 @@ execution schedule.
 
 ## Verification
 
-`55 pass / 0 fail`, no network required.
+```
+node tests/run.mjs        →  27 pass / 0 fail
+python tests/test_node.py →   8 pass / 0 fail
+```
 
-Stays bypassed after submit and through the run, restores on finish · stays through
-batches and multi-item queues · restores on interrupt · net restores and warns on a
-rejected submit · does nothing on a title typo, `enabled=false`, or when the control
-node itself is bypassed · `Active` works in reverse · mixed original modes each
-restore to their own value · **core partial execution and rgthree group ▶ both do
-nothing at apply, during and after, and the very next main Run works normally** ·
-an empty `queueNodeIds` counts as a full run · works with rgthree absent · a call
-with no arguments counts as a main Run.
+No dependencies, no network, no ComfyUI, and both run on every push via
+[`.github/workflows/test.yml`](.github/workflows/test.yml). The frontend tests load
+`web/js/run_once_group.js` exactly as shipped: its `../../scripts/app.js` import resolves
+to the test doubles in `scripts/`, which is the only reason that directory exists at the
+repository root. ComfyUI serves `WEB_DIRECTORY` (`./web/js`) and nothing else, so it never
+sees it.
 
-Multiple groups: two groups applied and restored together · one bad line still
-applies the rest and warns only about that line · whitespace, blank lines and
-duplicates cleaned · a node shared by overlapping groups restores to its real
-`Mute` value · backward compatibility with the older `group_title` widget name ·
-right-click check, add, remove, clear all · **two nodes running as `Bypass` and
-`Active` simultaneously without touching each other**.
+Running against doubles means a change in ComfyUI itself stays green. The assumptions that
+buys, and a ten-minute manual pass for after a frontend update, are in
+[`tests/SMOKE.md`](tests/SMOKE.md).
+
+**Release timing** — an accepted submit survives well past the old two-second net while
+queued behind another job · a rejected submit restores without needing an
+`execution_start` that will never come · a `200` carrying `node_errors` counts as
+rejected · a stale `status{0}` landing right after acceptance does not release · a
+cleared queue is swept after its grace period · a resubmit inside the sweep window voids
+the stale sweep · a batch of two releases once, at the end
+· interrupt takes the normal path · a POST result that never reaches us is inferred from
+a growing queue.
+
+**Scope and correctness** — core partial execution and rgthree's group ▶ both do nothing,
+and the very next main Run works normally · one bad title still applies the rest and says
+which · a node shared by overlapping groups restores to its real `Mute` value · two nodes
+run `Bypass` and `Active` at once without touching each other · `enabled=false` does
+nothing · whitespace, blank lines and duplicates are cleaned · the older `group_title`
+widget name still works.
+
+**Saving mid-run** — a save taken while a run is held writes every node's real mode, and
+leaves the live canvas alone · the workflow embedded beside the prompt still records what
+actually ran · the guard goes inert once released · a node that already had an
+`onSerialize` keeps it.
+
+**UI** — the picker ticks chosen groups, flags titles matching nothing and removes them
+on click · the button is appended last and does not serialize, so `widgets_values` keeps
+the layout saved workflows were written against · a node saved before the button existed
+is grown to fit it and never shrunk · the badge reports counts, shortfalls, the held
+count during a run, and `off`.
+
+**Schema** (`tests/test_node.py`) — the class name saved workflows are keyed to, the widget
+order `widgets_values` restores positionally, the three litegraph modes the JS maps, and the
+absence of outputs that would put the node in the execution schedule.
 
 ## Browser cache
 
 Extension JS is cached by the browser. After updating, a restart may not be enough —
-**hard-refresh with Ctrl+F5**. You have the current build when the console shows:
-
-```
-[Run Once] rgthree group/node queue (N nodes) — leaving this submit alone.
-```
+**hard-refresh with Ctrl+F5**. You have the current build when the node shows a
+**Pick groups** button and a badge in its title bar; neither existed before.
 
 ## Limits
 
