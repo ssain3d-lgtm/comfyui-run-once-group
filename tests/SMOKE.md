@@ -18,6 +18,7 @@ So the doubles encode assumptions, and those assumptions are the part that needs
 | 5 | The `status` event carries `exec_info.queue_remaining`, counting queued **and** running prompts | inherited, unverified |
 | 6 | `execution_start` / `_success` / `_error` / `_interrupted` all carry `prompt_id` | inherited, unverified |
 | 7 | rgthree stashes ids on `globalThis.rgthree.queueNodeIds` for the duration of its submit | inherited, unverified |
+| 8 | `LGraphGroup` has a stable numeric `id`, included in `serialize()` and restored by `configure()` | 2026-08-20, [litegraph.js `src/LGraphGroup.ts`](https://github.com/Comfy-Org/litegraph.js) |
 
 Contracts 1 and 2 are the ones the mid-run save fix rests on. Break either and saving during a run
 silently goes back to capturing the temporary state — nothing throws.
@@ -40,8 +41,11 @@ Ten minutes in the real app. Put a slow group in the graph so there is time to l
 6. **Clear Queue** — queue a batch of 3, clear the queue mid-way. Modes come back within ~1.5s.
 7. **Scoped runs** — press ▶ on a group header (rgthree) and "Queue Selected Output Nodes". Both
    must leave the modes completely alone, and a normal Run right after must still work.
-8. **Picker** — rename a targeted group. The badge drops to `N/M groups` and the picker shows the
-   old title with an ✖.
+8. **Rename following** — pick a group via the picker, rename the group, run. The run must still
+   hold it, and the line in `group_titles` must rewrite itself to the new title. Delete a targeted
+   group instead: the badge drops to `N/M groups` and the picker shows the title with an ✖.
+9. **Per-group modes** — target two groups, give one `= Active` via the ticked row's submenu.
+   One run must bypass the plain one and activate the other, and both must restore.
 
 If any of these fail, the contract table above is the place to start, and a failing case belongs in
 `tests/run.mjs` before it is fixed.

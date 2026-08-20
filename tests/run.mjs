@@ -29,8 +29,10 @@ function makeNode(id, mode = MODE.Active) {
     return { id, mode, widgets: [], flags: {}, size: [220, 120], pos: [0, 0] };
 }
 
-function makeGroup(title, nodes) {
-    return { title, _nodes: nodes, recomputeInsideNodes() {} };
+/** litegraph gives groups a stable serialized id; the double must too, or id-tracking is untestable. */
+let nextGroupId = 1;
+function makeGroup(title, nodes, id = nextGroupId++) {
+    return { id, title, _nodes: nodes, recomputeInsideNodes() {} };
 }
 
 /** A control node built the way ComfyUI builds it: three widgets, in order. */
@@ -42,6 +44,7 @@ function makeControl(ext, { titles = "", mode = "Bypass", enabled = true } = {})
     const node = makeNode("ctrl");
     node.type = "RunOnceGroupMode";
     node.comfyClass = "RunOnceGroupMode";
+    node.properties = {};          // LGraphNode always has one; the id annotations live here
     node.graph = app.graph;
     node.widgets = [
         { name: "enabled", value: enabled },
@@ -244,6 +247,170 @@ await test("acceptance is inferred when the POST result never reaches us", async
     assert.equal(a.mode, MODE.Bypass, "held rather than torn down under a live run");
     api.status(0);
     assert.equal(a.mode, MODE.Active);
+});
+
+/* ------------------------------------------------------------------ per-group modes */
+
+const ANN_KEY = "sain3.runOnce.ids";
+
+await test("a line's own mode overrides the default, and both restore", async () => {
+    const ext = await setupExtension();
+    const off = makeNode("off", MODE.Bypass);   // normally-off group the run should activate
+    const on = makeNode("on", MODE.Active);     // normally-on group the run should bypass
+    app.graph.groups = [makeGroup("Warmup", [off]), makeGroup("Upscale", [on])];
+    const ctrl = makeControl(ext, { titles: "Warmup = Active\nUpscale", mode: "Bypass" });
+    app.graph._nodes = [ctrl, off, on];
+
+    await app.queuePrompt(0, 1);
+    assert.equal(off.mode, MODE.Active, "the = Active line turned its group on");
+    assert.equal(on.mode, MODE.Bypass, "the plain line used the default");
+
+    api.emit("execution_start", {});
+    api.emit("execution_success", { prompt_id: api.accepted.at(-1) });
+    api.status(0);
+    assert.equal(off.mode, MODE.Bypass, "restored to its real off state");
+    assert.equal(on.mode, MODE.Active);
+});
+
+await test("the mode suffix is forgiving, and '=' inside a title is left alone", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    const b = makeNode("b");
+    app.graph.groups = [makeGroup("Upscale", [a]), makeGroup("A = B Group", [b])];
+    const ctrl = makeControl(ext, { titles: "  Upscale=MUTE  \nA = B Group" });
+    app.graph._nodes = [ctrl, a, b];
+
+    await app.queuePrompt(0, 1);
+    assert.equal(a.mode, MODE.Mute, "no-space, wrong-case suffix still parses");
+    assert.equal(b.mode, MODE.Bypass, "'= B Group' is not a mode word, so the title stays whole");
+    assert.equal(app.extensionManager.toast._sent.length, 0);
+});
+
+await test("the picker's mode submenu writes and clears the suffix", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    app.graph.groups = [makeGroup("Upscale", [a])];
+    const ctrl = makeControl(ext, { titles: "Upscale" });
+    app.graph._nodes = [ctrl, a];
+
+    let options = [];
+    ctrl.getExtraMenuOptions(app.canvas, options);
+    let row = options.at(-1).submenu.options.find((r) => r.content.startsWith("✔"));
+    assert.ok(row.has_submenu, "a targeted row opens a mode submenu");
+    row.submenu.options.find((r) => r.content.endsWith(" Active")).callback();
+    assert.equal(ctrl.widgets[1].value, "Upscale = Active");
+
+    options = [];
+    ctrl.getExtraMenuOptions(app.canvas, options);
+    row = options.at(-1).submenu.options.find((r) => r.content.startsWith("✔"));
+    assert.ok(row.content.includes("· Active"), "the row shows the override");
+    row.submenu.options.find((r) => r.content.includes("Default")).callback();
+    assert.equal(ctrl.widgets[1].value, "Upscale", "back to the default, suffix gone");
+});
+
+/* ------------------------------------------------------------------ id tracking */
+
+await test("a group picked by click is followed through a rename", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    const group = makeGroup("Upscale", [a]);
+    app.graph.groups = [group];
+    const ctrl = makeControl(ext, { titles: "" });
+    app.graph._nodes = [ctrl, a];
+
+    // Pick it the way a user does, so the id annotation is written.
+    const options = [];
+    ctrl.getExtraMenuOptions(app.canvas, options);
+    options.at(-1).submenu.options.find((r) => r.content.includes("Upscale")).callback();
+    assert.deepEqual(ctrl.properties[ANN_KEY], [{ title: "Upscale", id: group.id }]);
+
+    group.title = "Upscale 2x";
+    await app.queuePrompt(0, 1);
+    assert.equal(a.mode, MODE.Bypass, "the renamed group is still the target");
+    assert.equal(ctrl.widgets[1].value, "Upscale 2x", "the line healed to the new title");
+    assert.equal(ctrl.properties[ANN_KEY][0].title, "Upscale 2x");
+    assert.equal(app.extensionManager.toast._sent.length, 0, "no missing-group warning");
+});
+
+await test("a rename heals the line but keeps that line's own mode", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a", MODE.Bypass);
+    const group = makeGroup("Warmup", [a]);
+    app.graph.groups = [group];
+    const ctrl = makeControl(ext, { titles: "Warmup = Active" });
+    app.graph._nodes = [ctrl, a];
+
+    await app.queuePrompt(0, 1);                 // backfills the annotation by title
+    api.emit("execution_start", {});
+    api.emit("execution_success", { prompt_id: api.accepted.at(-1) });
+    api.status(0);
+
+    group.title = "Init";
+    await app.queuePrompt(0, 1);
+    assert.equal(ctrl.widgets[1].value, "Init = Active", "title healed, suffix intact");
+    assert.equal(a.mode, MODE.Active, "and the override still applies");
+});
+
+await test("a hand-typed line matches by title and backfills its annotation", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    const group = makeGroup("Upscale", [a]);
+    app.graph.groups = [group];
+    const ctrl = makeControl(ext, { titles: "Upscale" });   // typed, never clicked
+    app.graph._nodes = [ctrl, a];
+
+    await app.queuePrompt(0, 1);
+    assert.equal(a.mode, MODE.Bypass);
+    assert.deepEqual(ctrl.properties[ANN_KEY], [{ title: "Upscale", id: group.id }]);
+});
+
+await test("the badge sees a rename as found but never mutates during a draw", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    const group = makeGroup("Upscale", [a]);
+    app.graph.groups = [group];
+    const ctrl = makeControl(ext, { titles: "Upscale" });
+    app.graph._nodes = [ctrl, a];
+
+    await app.queuePrompt(0, 1);                 // annotation now exists
+    api.emit("execution_start", {});
+    api.emit("execution_success", { prompt_id: api.accepted.at(-1) });
+    api.status(0);
+
+    group.title = "Upscale 2x";
+    const drawn = [];
+    const ctx = {
+        save() {}, restore() {}, beginPath() {}, rect() {}, roundRect() {}, fill() {},
+        measureText: (t) => ({ width: t.length * 6 }),
+        fillText: (t) => drawn.push(t),
+    };
+    ctrl.onDrawForeground(ctx);
+    assert.equal(drawn.at(-1), "1 group", "found via the id, not reported missing");
+    assert.equal(ctrl.widgets[1].value, "Upscale", "a draw pass healed nothing");
+});
+
+await test("a deleted group stays missing even with an annotation, and Remove prunes it", async () => {
+    const ext = await setupExtension();
+    const a = makeNode("a");
+    app.graph.groups = [makeGroup("Upscale", [a]), makeGroup("Gone", [a])];
+    const ctrl = makeControl(ext, { titles: "Upscale\nGone" });
+    app.graph._nodes = [ctrl, a];
+
+    await app.queuePrompt(0, 1);                 // both annotated
+    api.emit("execution_start", {});
+    api.emit("execution_success", { prompt_id: api.accepted.at(-1) });
+    api.status(0);
+
+    app.graph.groups = app.graph.groups.filter((g) => g.title !== "Gone");
+    const options = [];
+    ctrl.getExtraMenuOptions(app.canvas, options);
+    const stale = options.at(-1).submenu.options.find((r) => r.content.startsWith("✖"));
+    assert.ok(stale && stale.content.includes("Gone"), "deleted group is flagged, not silently kept");
+
+    stale.callback();
+    assert.equal(ctrl.widgets[1].value, "Upscale");
+    assert.deepEqual(ctrl.properties[ANN_KEY].map((x) => x.title), ["Upscale"],
+        "the dead annotation went with the line");
 });
 
 /* ------------------------------------------------------------------ saving mid-run */

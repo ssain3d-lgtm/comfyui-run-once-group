@@ -23,10 +23,11 @@ Restart ComfyUI, then hard-refresh the browser (Ctrl+F5). No dependencies.
 ## Use
 
 1. Add **Run Once Group Toggle** anywhere on the canvas.
-2. Press **Pick groups** on the node (or right-click it — same menu). Each click toggles
-   a `✔`, and the chosen titles collect in the `group_titles` box, one per line. The last
-   entry clears them all.
-3. Pick `mode_during_run`. It applies to every group you chose.
+2. Press **Pick groups** on the node (or right-click it — same menu). Clicking an unticked
+   group adds it; a ticked group opens a small menu: its mode for the run
+   (`Default / Bypass / Mute / Active`) and `Remove`. The chosen groups collect in the
+   `group_titles` box, one per line, and the last entry clears them all.
+3. Pick `mode_during_run`. It is the default for every line that does not set its own.
 
 The badge in the node's title bar says what will happen, so you never have to open the
 console to find out:
@@ -56,18 +57,48 @@ punctuation — `D. Upscale · Interpolate (all bypassed)` would be shredded by 
 split and match nothing. Leading and trailing spaces, blank lines and duplicates are
 cleaned up for you.
 
+**A line may end with `= Mode`** to give that one group its own mode for the run:
+
+```
+Warmup = Active
+Upscale
+Face fix = Mute
+```
+
+`Upscale` uses `mode_during_run`; the other two override it. The suffix only counts when
+the part after the last `=` is exactly `Active`, `Mute` or `Bypass` (any casing, spaces
+optional), so a title like `A = B Group` is still read as one whole title. The picker's
+mode submenu writes and clears these suffixes for you.
+
 A typo on one line does not stop the rest: the groups that matched are still applied,
 and only the missing title is called out — on the badge before the run, as a toast at
 the moment it costs you work, and in the console with the graph's current group list.
+
+### Renaming a group does not break the list
+
+Every group carries a stable litegraph `id`, and the node remembers which id each line
+meant (under `properties["sain3.runOnce.ids"]`, saved with the workflow). When a title
+stops matching but the remembered id still exists, the group is followed and the line is
+rewritten to its new title — mode suffix intact — the next time you run or open the
+picker. The `✖` rows in the picker now mean the group is genuinely gone, or the line
+predates the annotations.
+
+The lines stay authoritative: hand-typed titles match by name and pick up an id on first
+use, and losing the annotations only degrades matching back to titles. Two groups with
+the same title still collapse to one line and match the first — rename one of them if
+you need them targeted separately.
 
 **Overlapping groups are safe.** If one node belongs to two groups you selected, the
 first claim records its original mode and it is restored exactly once.
 
 ### Different modes at once
 
-Put down a second node. `tracked` and `cycle` are module-level, so instances
-cooperate: one can bypass group A while another activates group B in the same submit,
-and everything is restored together at the end.
+One node is enough: give each line its own `= Mode`. Line order is priority order — when
+groups overlap, the earlier line claims the shared node and records its true original
+mode, exactly once.
+
+A second node still works and cooperates (`tracked` and `cycle` are module-level), which
+keeps every workflow built before per-line modes behaving as it always did.
 
 Toggles never target each other. `beforeQueued` fires per node in graph order, and
 bypassing a toggle whose turn has not come would trip its own `ctrl.mode === Bypass`
@@ -192,7 +223,7 @@ execution schedule.
 ## Verification
 
 ```
-node tests/run.mjs        →  27 pass / 0 fail
+node tests/run.mjs        →  35 pass / 0 fail
 python tests/test_node.py →   8 pass / 0 fail
 ```
 
@@ -222,6 +253,17 @@ which · a node shared by overlapping groups restores to its real `Mute` value �
 run `Bypass` and `Active` at once without touching each other · `enabled=false` does
 nothing · whitespace, blank lines and duplicates are cleaned · the older `group_title`
 widget name still works.
+
+**Per-group modes** — a line's `= Active` overrides the default while a plain line keeps
+it, and both restore to their real values · the suffix parses with any casing and spacing
+while `A = B Group` stays one title · the picker submenu writes, shows and clears the
+suffix.
+
+**Id tracking** — a group picked by click is followed through a rename, the line healing
+to the new title with its mode suffix intact and no missing-group warning · a hand-typed
+line matches by title and backfills its annotation · the badge counts a renamed group as
+found but never mutates anything during a draw pass · a deleted group is flagged `✖` even
+with an annotation, and removing the line prunes it.
 
 **Saving mid-run** — a save taken while a run is held writes every node's real mode, and
 leaves the live canvas alone · the workflow embedded beside the prompt still records what

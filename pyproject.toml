@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-run-once-group"
 description = "Switch chosen groups to Bypass, Mute or Active for one queue submit, then put every node back to the mode it actually had."
-version = "1.0.0"
+version = "1.1.0"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 # Deliberately empty. The node holds settings and the work happens in the frontend, so there is
