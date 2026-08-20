@@ -14,6 +14,10 @@ must stay in slot 1 where the old single-line `group_title` was: a workflow save
 ["...", "D. Upscale - Interpolate", "Bypass"] reloads as a one-line list and keeps working.
 The JS adds a "Pick groups" button on top of these three; it is appended last and flagged
 non-serializing precisely so slots 0-2 keep meaning what every saved workflow says they mean.
+
+The JS also keeps {title, id} pairs under node.properties["sain3.runOnce.ids"] so a renamed group
+can be followed by its litegraph id. That is an annotation cache, not a second source of truth:
+losing it merely degrades matching back to titles, which is why nothing here declares or reads it.
 """
 
 
@@ -31,15 +35,18 @@ class RunOnceGroupMode:
                 "group_titles": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "tooltip": "One target group title per line. Right-click the node to tick "
-                               "groups from the current graph instead of typing them. Newline is "
-                               "the only separator - titles often contain commas, so a comma "
-                               "split would tear them in half and match nothing.",
+                    "tooltip": "One target group per line. Press Pick groups (or right-click the "
+                               "node) to tick groups instead of typing. A line may carry its own "
+                               "mode - 'Upscale = Active' - and lines without one use "
+                               "mode_during_run. Newline is the only separator - titles often "
+                               "contain commas, so a comma split would tear them in half and "
+                               "match nothing.",
                 }),
                 "mode_during_run": (["Bypass", "Mute", "Active"], {
                     "default": "Bypass",
-                    "tooltip": "Hold every chosen group in this mode for the run you just "
-                               "started, then put each node back to the mode it actually had.",
+                    "tooltip": "Default mode for every chosen group without its own '= Mode' "
+                               "suffix. Held for the run you just started, then each node goes "
+                               "back to the mode it actually had.",
                 }),
             },
         }

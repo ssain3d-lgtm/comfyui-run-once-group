@@ -127,29 +127,42 @@ function titlesWidget(node) {
 }
 
 /**
- * One group title per line.
+ * One group per line: `Title`, or `Title = Mode` to give that group its own mode for the run.
  *
  * Newline is the only separator on purpose. Titles in these workflows contain commas and other
  * punctuation -- "D. Upscale, Interpolate (all bypassed)" -- so splitting on anything else would
- * tear a title in half and then silently match nothing.
+ * tear a title in half and then silently match nothing. The mode suffix only counts when the part
+ * after the last `=` is exactly a mode word, so "A = B Group" stays one whole title.
  */
-function targetTitles(node) {
+function parseTargets(node) {
     const raw = String(titlesWidget(node)?.value ?? "");
     const seen = new Set();
     const out = [];
     for (const line of raw.split(/\r?\n/)) {
-        const title = line.trim();
-        if (!title || seen.has(title)) continue;   // duplicate lines would double-count, not double-apply
+        let title = line.trim();
+        if (!title) continue;
+        let mode = null;
+        const m = title.match(/\s*=\s*(active|mute|bypass)$/i);
+        if (m && m.index > 0) {
+            title = title.slice(0, m.index).trim();
+            mode = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+        }
+        if (seen.has(title)) continue;   // duplicate lines would double-count, not double-apply
         seen.add(title);
-        out.push(title);
+        out.push({ title, mode });
     }
     return out;
 }
 
-function setTitles(node, titles) {
+function targetLine(entry) {
+    return entry.mode ? `${entry.title} = ${entry.mode}` : entry.title;
+}
+
+function setTargets(node, entries) {
     const w = titlesWidget(node);
     if (!w) return;
-    w.value = titles.join("\n");
+    w.value = entries.map(targetLine).join("\n");
+    pruneAnnotations(node, entries);
     w.callback?.(w.value);
     app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -158,17 +171,93 @@ function graphGroups(node) {
     return (node?.graph ?? app.graph)?.groups ?? [];
 }
 
-/** Split the node's chosen titles into the ones that name a real group and the ones that do not. */
-function resolveTitles(node, titles = targetTitles(node)) {
+/* ------------------------------------------------------------------- id annotations */
+
+/**
+ * litegraph gives every group a stable, serialized `id`, and these {title, id} pairs remember
+ * which one each line meant. That is what lets a rename be followed instead of just flagged.
+ *
+ * node.properties is the storage because litegraph serializes it with the node while
+ * widgets_values stays positional and untouched -- an old frontend simply ignores the key. The
+ * annotations are a cache, never a second source of truth: the text lines stay authoritative for
+ * what is targeted, and losing the cache only degrades matching back to titles.
+ */
+const ANN_KEY = "sain3.runOnce.ids";
+
+/** Read-only view. Creating the list belongs to write paths -- the badge reads every frame. */
+function annotations(node) {
+    const list = node?.properties?.[ANN_KEY];
+    return Array.isArray(list) ? list : [];
+}
+
+function rememberId(node, title, id) {
+    if (id === undefined || id === null) return;
+    if (!node.properties || typeof node.properties !== "object") node.properties = {};
+    if (!Array.isArray(node.properties[ANN_KEY])) node.properties[ANN_KEY] = [];
+    const anns = node.properties[ANN_KEY];
+    const hit = anns.find((a) => a && a.title === title);
+    if (hit) hit.id = id;
+    else anns.push({ title, id });
+}
+
+/** Annotations for lines that no longer exist would pin ids forever; drop them with the line. */
+function pruneAnnotations(node, entries = parseTargets(node)) {
+    const anns = node?.properties?.[ANN_KEY];
+    if (!Array.isArray(anns)) return;
+    const titles = new Set(entries.map((e) => e.title));
+    for (let i = anns.length - 1; i >= 0; i--) {
+        if (!anns[i] || !titles.has(anns[i].title)) anns.splice(i, 1);
+    }
+}
+
+/**
+ * Match every line to a live group: by remembered id first, then by title.
+ *
+ * Id wins because it is the group the user actually clicked; the title is how a hand-typed line
+ * says the same thing. When an id-match reveals a rename, a healing pass rewrites the line (mode
+ * suffix intact) so the list follows the group. `heal` is only true on user-action paths -- apply
+ * and opening the picker. The badge redraws every frame and must never mutate the graph, so its
+ * resolution runs with heal=false and simply reports the rename as still-found.
+ */
+function resolveTargets(node, { heal = false } = {}) {
+    const entries = parseTargets(node);
     const byTitle = new Map();
+    const byId = new Map();
     for (const g of graphGroups(node)) {
         const title = String(g.title ?? "").trim();
         if (title && !byTitle.has(title)) byTitle.set(title, g);
+        if (g.id !== undefined && g.id !== null && !byId.has(g.id)) byId.set(g.id, g);
     }
+    const anns = annotations(node);
     const found = [];
     const missing = [];
-    for (const t of titles) (byTitle.has(t) ? found : missing).push(t);
-    return { byTitle, found, missing };
+    let healed = false;
+    for (const entry of entries) {
+        const ann = anns.find((a) => a && a.title === entry.title);
+        const remembered = ann ? byId.get(ann.id) : undefined;
+        if (remembered) {
+            const current = String(remembered.title ?? "").trim();
+            if (heal && current && current !== entry.title) {
+                entry.title = current;
+                ann.title = current;
+                healed = true;
+            }
+            found.push({ entry, group: remembered });
+            continue;
+        }
+        const g = byTitle.get(entry.title);
+        if (g) {
+            if (heal) rememberId(node, entry.title, g.id);
+            found.push({ entry, group: g });
+        } else {
+            missing.push(entry);
+        }
+    }
+    if (heal) {
+        if (healed) setTargets(node, entries);   // also prunes
+        else pruneAnnotations(node, entries);
+    }
+    return { entries, found, missing };
 }
 
 function groupMembers(group) {
@@ -186,20 +275,19 @@ function applyFor(ctrl) {
     if (ctrl.mode === MODES.Bypass || ctrl.mode === MODES.Mute) return;
     if (widgetValue(ctrl, "enabled") === false) return;
 
-    const titles = targetTitles(ctrl);
-    if (!titles.length) return;
+    const defaultMode = String(widgetValue(ctrl, "mode_during_run") ?? "Bypass");
+    const { entries, found, missing } = resolveTargets(ctrl, { heal: true });
+    if (!entries.length) return;
 
-    const wanted = MODES[String(widgetValue(ctrl, "mode_during_run") ?? "Bypass")];
-    if (wanted === undefined) return;
-
-    const { byTitle, missing } = resolveTitles(ctrl, titles);
     const applied = [];
     let changed = 0;
 
-    for (const title of titles) {
-        const group = byTitle.get(title);
-        // One bad line must not cost the user the other groups, so carry on; `missing` has it.
-        if (!group) continue;
+    // Line order is priority order: when groups overlap, the earlier line claims the shared node
+    // and the wanted mode of the later line does not reach it -- same first-claim rule that keeps
+    // two control nodes from fighting.
+    for (const { entry, group } of found) {
+        const wanted = MODES[entry.mode ?? defaultMode];
+        if (wanted === undefined) continue;
         let n = 0;
         for (const node of groupMembers(group)) {
             if (node === ctrl) continue;        // never switch off its own settings
@@ -219,7 +307,7 @@ function applyFor(ctrl) {
             n += 1;
         }
         changed += n;
-        applied.push(`"${title}" ${n}`);
+        applied.push(`"${entry.title}" → ${MODE_NAME[wanted]} (${n})`);
     }
 
     if (changed) heldBy.set(ctrl, changed);
@@ -227,14 +315,15 @@ function applyFor(ctrl) {
     if (missing.length) {
         // Silence would be indistinguishable from the feature being broken. The badge on the node
         // shows the same shortfall before the run; this reports it at the moment it costs work.
-        const list = missing.map((t) => JSON.stringify(t)).join(", ");
-        console.warn(`${TAG} no such group: ${list} — groups in this graph: ` +
+        const titles = missing.map((e) => e.title);
+        console.warn(`${TAG} no such group: ` +
+            titles.map((t) => JSON.stringify(t)).join(", ") + " — groups in this graph: " +
             graphGroups(ctrl).map((g) => JSON.stringify(String(g.title ?? ""))).join(", "));
-        notify("warn", `${TAG} group not found`, missing.join(", "));
+        notify("warn", `${TAG} group not found`, titles.join(", "));
     }
     if (changed) {
-        console.log(`${TAG} ${applied.join(", ")} — ${changed} nodes switched to ` +
-            `${MODE_NAME[wanted]}. Released when the run ends.`);
+        console.log(`${TAG} ${applied.join(", ")} — ${changed} nodes switched. ` +
+            `Released when the run ends.`);
     }
 }
 
@@ -530,12 +619,12 @@ function statusFor(node) {
     }
     if (widgetValue(node, "enabled") === false) return { text: "off", bg: "#3a3a40", fg: "#9a9aa2" };
 
-    const titles = targetTitles(node);
-    if (!titles.length) return { text: "no groups", bg: "#3a3a40", fg: "#9a9aa2" };
+    // heal=false: this runs on every draw frame, and a draw pass must never mutate the graph.
+    const { entries, found, missing } = resolveTargets(node);
+    if (!entries.length) return { text: "no groups", bg: "#3a3a40", fg: "#9a9aa2" };
 
-    const { found, missing } = resolveTitles(node, titles);
     if (missing.length) {
-        return { text: `${found.length}/${titles.length} groups`, bg: "#7a3b32", fg: "#ffd9d2" };
+        return { text: `${found.length}/${entries.length} groups`, bg: "#7a3b32", fg: "#ffd9d2" };
     }
     return { text: `${found.length} group${found.length === 1 ? "" : "s"}`, bg: "#3a3a40", fg: "#c8c8d0" };
 }
@@ -582,36 +671,73 @@ function drawStatusBadge(node, ctx) {
  * graph, so a renamed or deleted group left a line in the widget that the picker never mentioned
  * again -- invisible, unmatched, and only findable by reading the console after a run.
  */
-function pickerEntries(node) {
-    const graphTitles = graphGroups(node)
-        .map((g) => String(g.title ?? "").trim())
-        .filter(Boolean);
-    const chosen = targetTitles(node);
-    const chosenSet = new Set(chosen);
-    const graphSet = new Set(graphTitles);
-
-    const entries = graphTitles.map((t) => ({
-        // litegraph submenu entries have no checkbox, so the tick lives in the label.
-        content: `${chosenSet.has(t) ? "✔" : " "} ${t}`,
-        callback: () => {
-            // Toggle, preserving the order the user picked things in.
-            setTitles(node, chosenSet.has(t)
-                ? chosen.filter((x) => x !== t)
-                : [...chosen, t]);
+function modeRows(node, title) {
+    const defaultMode = String(widgetValue(node, "mode_during_run") ?? "Bypass");
+    const setMode = (mode) => () => {
+        const entries = parseTargets(node);
+        const entry = entries.find((e) => e.title === title);
+        if (!entry) return;
+        entry.mode = mode;
+        setTargets(node, entries);
+    };
+    const current = parseTargets(node).find((e) => e.title === title)?.mode ?? null;
+    return [
+        { content: `${current === null ? "✔" : " "} Default (${defaultMode})`, callback: setMode(null) },
+        ...Object.keys(MODES).map((m) => ({
+            content: `${current === m ? "✔" : " "} ${m}`,
+            callback: setMode(m),
+        })),
+        {
+            content: "— Remove",
+            callback: () => setTargets(node, parseTargets(node).filter((e) => e.title !== title)),
         },
-    }));
+    ];
+}
 
-    for (const t of chosen.filter((x) => !graphSet.has(x))) {
-        entries.push({
-            content: `✖ ${t}  (not in this graph)`,
-            callback: () => setTitles(node, chosen.filter((x) => x !== t)),
+function pickerEntries(node) {
+    // Opening the picker is a user action, so it is one of the two moments allowed to heal.
+    const { entries, missing } = resolveTargets(node, { heal: true });
+    const byTitle = new Map(entries.map((e) => [e.title, e]));
+
+    const rows = [];
+    const seen = new Set();
+    for (const g of graphGroups(node)) {
+        const t = String(g.title ?? "").trim();
+        if (!t || seen.has(t)) continue;
+        seen.add(t);
+        const entry = byTitle.get(t);
+        if (entry) {
+            rows.push({
+                // litegraph submenu entries have no checkbox, so the tick lives in the label,
+                // and the per-group mode -- when one is set -- rides along after it.
+                content: `✔ ${t}${entry.mode ? ` · ${entry.mode}` : ""}`,
+                has_submenu: true,
+                submenu: { options: modeRows(node, t) },
+            });
+        } else {
+            rows.push({
+                content: `  ${t}`,
+                callback: () => {
+                    // Append, preserving the order the user picked things in, and remember the
+                    // exact group so a later rename can be followed.
+                    rememberId(node, t, g.id);
+                    setTargets(node, [...parseTargets(node), { title: t, mode: null }]);
+                },
+            });
+        }
+    }
+
+    for (const e of missing) {
+        rows.push({
+            content: `✖ ${e.title}  (not in this graph)`,
+            callback: () => setTargets(node, parseTargets(node).filter((x) => x.title !== e.title)),
         });
     }
 
-    if (chosen.length) {
-        entries.push({ content: "— Clear all", callback: () => setTitles(node, []) });
+    if (entries.length) {
+        rows.push({ content: "— Clear all", callback: () => setTargets(node, []) });
     }
-    return entries.length ? entries : [{ content: "(no groups)", disabled: true }];
+    return rows.length ? rows : [{ content: "(no groups)", disabled: true }];
 }
 
 /** The right-click submenu is the litegraph idiom; the button is for everyone who never tries it. */
